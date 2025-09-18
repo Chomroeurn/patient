@@ -1,16 +1,13 @@
-
-[build]
-builder = "NIXPACKS"
-
-[deploy]
-healthcheckPath = "/"
-healthcheckTimeout = 300
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 10
-
-[[deploy.environmentVariables]]
-name = "TELEGRAM_BOT_TOKEN"
-value = "${{TELEGRAM_BOT_TOKEN}}"
-
-[environments.production]
-variables = {}
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE"
+  },
+  "deploy": {
+    "startCommand": "python main.py",
+    "healthcheckPath": "/",
+    "healthcheckTimeout": 100,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
