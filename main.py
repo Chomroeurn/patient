@@ -6,6 +6,12 @@ import sqlite3
 import os
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler
+from reportlab.lib.pagesizes import A4
+from reportlab.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib import colors
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -19,6 +25,95 @@ class MedicalBot:
         self.token = token
         self.db_path = "medical_records.db"
         self.init_database()
+
+    def generate_prescription_pdf(self, patient_name: str, patient_age: int, diagnosis: str, medications: list, prescription_id: int) -> str:
+        """Generate PDF prescription"""
+        filename = f"prescription_{prescription_id}_{patient_name.replace(' ', '_')}.pdf"
+        filepath = os.path.join(os.getcwd(), filename)
+        
+        # Create PDF document
+        doc = SimpleDocTemplate(filepath, pagesize=A4)
+        story = []
+        
+        # Get styles
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            spaceAfter=30,
+            alignment=1  # Center alignment
+        )
+        
+        # Header
+        story.append(Paragraph("🏥 MEDICAL PRESCRIPTION", title_style))
+        story.append(Spacer(1, 20))
+        
+        # Date and prescription info
+        today = datetime.now().strftime("%d/%m/%Y")
+        prescription_info = f"""
+        <b>Prescription ID:</b> #{prescription_id}<br/>
+        <b>Date:</b> {today}<br/>
+        <b>Patient:</b> {patient_name}<br/>
+        <b>Age:</b> {patient_age} years<br/>
+        <b>Diagnosis:</b> {diagnosis}
+        """
+        
+        story.append(Paragraph(prescription_info, styles['Normal']))
+        story.append(Spacer(1, 20))
+        
+        # Medications table
+        story.append(Paragraph("<b>PRESCRIBED MEDICATIONS:</b>", styles['Heading2']))
+        story.append(Spacer(1, 10))
+        
+        # Create table data
+        table_data = [['#', 'Medication', 'Dosage', 'Quantity', 'Instructions']]
+        
+        for i, med in enumerate(medications, 1):
+            table_data.append([
+                str(i),
+                med['name'],
+                med['dosage'],
+                med['quantity'],
+                med['instructions']
+            ])
+        
+        # Create table
+        table = Table(table_data, colWidths=[0.5*inch, 2*inch, 1*inch, 1*inch, 3*inch])
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('FONTSIZE', (0, 1), (-1, -1), 10),
+        ]))
+        
+        story.append(table)
+        story.append(Spacer(1, 30))
+        
+        # Footer
+        footer_text = """
+        <b>Important Notes:</b><br/>
+        • Take medications as prescribed<br/>
+        • Complete the full course even if symptoms improve<br/>
+        • Contact doctor if side effects occur<br/>
+        • Store medications in a cool, dry place<br/>
+        • Do not share medications with others<br/><br/>
+        
+        <b>Doctor's Signature:</b> _________________________<br/>
+        <b>Date:</b> {}<br/>
+        """.format(today)
+        
+        story.append(Paragraph(footer_text, styles['Normal']))
+        
+        # Build PDF
+        doc.build(story)
+        return filepath
 
     def init_database(self):
         """Initialize SQLite database for storing patient and prescription data"""
@@ -355,21 +450,59 @@ Please enter your prescription:
             ))
 
             prescription_id = cursor.lastrowid
+
+            # Get patient details for PDF
+            cursor.execute('SELECT name, age FROM patients WHERE id = ?', (context.user_data['selected_patient_id'],))
+            patient = cursor.fetchone()
+            
             conn.commit()
             conn.close()
 
-            success_message = f"""
+            # Generate PDF
+            try:
+                pdf_path = self.generate_prescription_pdf(
+                    patient[0], 
+                    patient[1], 
+                    context.user_data['diagnosis'],
+                    context.user_data['medications'],
+                    prescription_id
+                )
+                
+                # Send PDF to user
+                with open(pdf_path, 'rb') as pdf_file:
+                    await update.message.reply_document(
+                        document=pdf_file,
+                        filename=f"prescription_{prescription_id}.pdf",
+                        caption=f"📄 Prescription PDF for {patient[0]}"
+                    )
+                
+                # Clean up PDF file
+                os.remove(pdf_path)
+                
+                success_message = f"""
 ✅ **Prescription Saved Successfully!**
 
 📋 **Prescription ID:** {prescription_id}
 📅 **Date:** {today.strftime("%d-%m-%Y")}
+📄 **PDF Generated:** Prescription PDF sent above
 
-The prescription has been saved to the database.
+The prescription has been saved to the database and PDF generated.
 
 **Next Steps:**
 • Print prescription for patient
 • Schedule follow-up appointment
 • Monitor treatment progress
+"""
+            except Exception as e:
+                logger.error(f"Error generating PDF: {e}")
+                success_message = f"""
+✅ **Prescription Saved Successfully!**
+
+📋 **Prescription ID:** {prescription_id}
+📅 **Date:** {today.strftime("%d-%m-%Y")}
+❌ **PDF Error:** Could not generate PDF
+
+The prescription has been saved to the database.
 """
 
             keyboard = [['🏠 Main Menu', '💊 New Prescription']]
