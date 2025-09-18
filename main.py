@@ -1,3 +1,4 @@
+
 import logging
 import json
 from datetime import datetime, timedelta
@@ -12,6 +13,9 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
+from flask import Flask, request, Response
+import asyncio
+import threading
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -25,6 +29,28 @@ class MedicalBot:
         self.token = token
         self.db_path = "medical_records.db"
         self.init_database()
+        
+        # Initialize Flask for webhook
+        self.app = Flask(__name__)
+        self.setup_flask_routes()
+
+    def setup_flask_routes(self):
+        """Setup Flask routes for webhook"""
+        @self.app.route('/', methods=['GET'])
+        def health_check():
+            return "Medical Bot is running!", 200
+        
+        @self.app.route('/webhook', methods=['POST'])
+        def webhook():
+            """Handle webhook updates from Telegram"""
+            try:
+                json_string = request.get_data().decode('utf-8')
+                update = Update.de_json(json.loads(json_string), self.application.bot)
+                asyncio.create_task(self.application.process_update(update))
+                return Response(status=200)
+            except Exception as e:
+                logger.error(f"Error processing webhook: {e}")
+                return Response(status=500)
 
     def generate_prescription_pdf(self, patient_name: str, patient_age: int, diagnosis: str, medications: list, prescription_id: int) -> str:
         """Generate PDF prescription"""
@@ -706,9 +732,19 @@ The prescription has been saved to the database.
         elif text == '🏠 Main Menu':
             await self.start(update, context)
 
-    def run(self):
-        """Run the bot"""
+    async def setup_webhook(self):
+        """Setup webhook for Railway deployment"""
+        webhook_url = os.getenv('WEBHOOK_URL')
+        if webhook_url:
+            await self.application.bot.set_webhook(url=f"{webhook_url}/webhook")
+            logger.info(f"Webhook set to: {webhook_url}/webhook")
+        else:
+            logger.warning("WEBHOOK_URL not set, webhook not configured")
+
+    def run_polling(self):
+        """Run the bot in polling mode (for development)"""
         application = Application.builder().token(self.token).build()
+        self.application = application
 
         # Conversation handler for adding patients and prescriptions
         conv_handler = ConversationHandler(
@@ -733,19 +769,65 @@ The prescription has been saved to the database.
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.button_handler))
 
         # Run the bot
-        print("🤖 Medical Bot is starting...")
+        print("🤖 Medical Bot is starting in polling mode...")
         print("Bot is ready to receive messages!")
         application.run_polling()
 
+    def run_webhook(self):
+        """Run the bot in webhook mode (for Railway deployment)"""
+        # Initialize the application
+        self.application = Application.builder().token(self.token).build()
+
+        # Conversation handler for adding patients and prescriptions
+        conv_handler = ConversationHandler(
+            entry_points=[
+                MessageHandler(filters.Regex(r'^👤 Add New Patient$'), self.add_patient_start),
+                MessageHandler(filters.Regex(r'^💊 Create Prescription$'), self.create_prescription_start)
+            ],
+            states={
+                PATIENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.patient_name)],
+                PATIENT_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.patient_age)],
+                PATIENT_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.patient_phone)],
+                PATIENT_DIAGNOSIS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.patient_diagnosis)],
+                PRESCRIPTION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.prescription_input)],
+                CONFIRM_PRESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.save_prescription)]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel)]
+        )
+
+        # Command handlers
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(conv_handler)
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.button_handler))
+
+        # Setup webhook
+        asyncio.run(self.setup_webhook())
+
+        # Get port from environment variable (Railway sets this automatically)
+        port = int(os.getenv('PORT', 5000))
+        
+        print(f"🤖 Medical Bot is starting in webhook mode on port {port}...")
+        print("Bot webhook is ready!")
+        
+        # Run Flask app
+        self.app.run(host='0.0.0.0', port=port, debug=False)
+
 # Usage
 if __name__ == '__main__':
-    # Get bot token from environment variable (Replit Secrets)
+    # Get bot token from environment variable
     BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
     if not BOT_TOKEN:
-        print("❌ Please set TELEGRAM_BOT_TOKEN in Replit Secrets")
+        print("❌ Please set TELEGRAM_BOT_TOKEN in environment variables")
         print("📱 Get your token from @BotFather on Telegram")
-        print("🔒 Add it to Secrets tab for security")
+        exit(1)
+
+    bot = MedicalBot(BOT_TOKEN)
+    
+    # Check if running on Railway (production) or locally (development)
+    if os.getenv('RAILWAY_ENVIRONMENT'):
+        # Railway deployment - use webhook mode
+        bot.run_webhook()
     else:
-        bot = MedicalBot(BOT_TOKEN)
-        bot.run()
+        # Local development - use polling mode
+        bot.run_polling()
