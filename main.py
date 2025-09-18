@@ -606,12 +606,13 @@ The prescription has been saved to the database.
 
 # Usage
 if __name__ == '__main__':
-    # Replace with your actual bot token from @BotFather
-    BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+    # Get bot token from environment variable (Replit Secrets)
+    BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-    if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("❌ Please replace BOT_TOKEN with your actual Telegram bot token")
+    if not BOT_TOKEN:
+        print("❌ Please set TELEGRAM_BOT_TOKEN in Replit Secrets")
         print("📱 Get your token from @BotFather on Telegram")
+        print("🔒 Add it to Secrets tab for security")
     else:
         bot = MedicalBot(BOT_TOKEN)
         bot.run()
