@@ -1,4 +1,3 @@
-
 import logging
 import json
 from datetime import datetime, timedelta
@@ -16,6 +15,10 @@ from reportlab.lib import colors
 from flask import Flask, request, Response
 import asyncio
 import threading
+import nest_asyncio
+
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -46,6 +49,18 @@ class MedicalBot:
             try:
                 json_string = request.get_data().decode('utf-8')
                 update = Update.de_json(json.loads(json_string), self.application.bot)
+                
+                # Create new event loop for this thread if needed
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                # Process the update
                 asyncio.create_task(self.application.process_update(update))
                 return Response(status=200)
             except Exception as e:
@@ -286,9 +301,11 @@ Would you like to create a prescription for this patient?
         conn.close()
 
         if not patients:
+            keyboard = [['👤 Add New Patient', '🏠 Main Menu']]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             await update.message.reply_text(
                 "❌ No patients found. Please add a patient first.",
-                reply_markup=ReplyKeyboardMarkup([['👤 Add New Patient']], resize_keyboard=True)
+                reply_markup=reply_markup
             )
             return ConversationHandler.END
 
@@ -503,7 +520,8 @@ Please enter your prescription:
                     )
                 
                 # Clean up PDF file
-                os.remove(pdf_path)
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
                 
                 success_message = f"""
 ✅ **Prescription Saved Successfully!**
@@ -572,7 +590,10 @@ The prescription has been saved to the database.
         patients_text = "👥 **Patient List:**\n\n"
 
         for patient in patients:
-            created_date = datetime.fromisoformat(patient[4]).strftime("%d-%m-%Y")
+            try:
+                created_date = datetime.fromisoformat(patient[4]).strftime("%d-%m-%Y")
+            except:
+                created_date = patient[4]
             patients_text += f"""
 **{patient[1]}** (ID: {patient[0]})
 🎂 Age: {patient[2]} years
@@ -605,8 +626,11 @@ The prescription has been saved to the database.
         prescriptions_text = "📋 **Recent Prescriptions:**\n\n"
 
         for rx in prescriptions:
-            medications = json.loads(rx[4])
-            med_count = len(medications)
+            try:
+                medications = json.loads(rx[4])
+                med_count = len(medications)
+            except:
+                med_count = "Unknown"
 
             prescriptions_text += f"""
 **Prescription #{rx[0]}**
@@ -731,13 +755,32 @@ The prescription has been saved to the database.
             await self.statistics(update, context)
         elif text == '🏠 Main Menu':
             await self.start(update, context)
+        elif text == '💊 New Prescription':
+            return await self.create_prescription_start(update, context)
+        else:
+            # Check if it's a search query when in search mode
+            if hasattr(context, 'user_data') and context.user_data.get('waiting_for_search'):
+                await self.handle_search(update, context)
+                context.user_data['waiting_for_search'] = False
+            else:
+                await update.message.reply_text(
+                    "Please select an option from the menu.",
+                    reply_markup=ReplyKeyboardMarkup([
+                        ['👤 Add New Patient', '📋 View Patients'],
+                        ['💊 Create Prescription', '📊 View Prescriptions'],
+                        ['🔍 Search Patient', '📈 Statistics']
+                    ], resize_keyboard=True)
+                )
 
     async def setup_webhook(self):
         """Setup webhook for Railway deployment"""
         webhook_url = os.getenv('WEBHOOK_URL')
         if webhook_url:
-            await self.application.bot.set_webhook(url=f"{webhook_url}/webhook")
-            logger.info(f"Webhook set to: {webhook_url}/webhook")
+            try:
+                await self.application.bot.set_webhook(url=f"{webhook_url}/webhook")
+                logger.info(f"Webhook set to: {webhook_url}/webhook")
+            except Exception as e:
+                logger.error(f"Failed to set webhook: {e}")
         else:
             logger.warning("WEBHOOK_URL not set, webhook not configured")
 
@@ -750,7 +793,8 @@ The prescription has been saved to the database.
         conv_handler = ConversationHandler(
             entry_points=[
                 MessageHandler(filters.Regex(r'^👤 Add New Patient$'), self.add_patient_start),
-                MessageHandler(filters.Regex(r'^💊 Create Prescription$'), self.create_prescription_start)
+                MessageHandler(filters.Regex(r'^💊 Create Prescription$'), self.create_prescription_start),
+                MessageHandler(filters.Regex(r'^💊 New Prescription$'), self.create_prescription_start)
             ],
             states={
                 PATIENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.patient_name)],
@@ -760,7 +804,11 @@ The prescription has been saved to the database.
                 PRESCRIPTION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.prescription_input)],
                 CONFIRM_PRESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.save_prescription)]
             },
-            fallbacks=[CommandHandler('cancel', self.cancel)]
+            fallbacks=[
+                CommandHandler('cancel', self.cancel),
+                MessageHandler(filters.Regex(r'^🚫 Cancel), self.cancel),
+                MessageHandler(filters.Regex(r'^❌ Cancel), self.cancel)
+            ]
         )
 
         # Command handlers
@@ -771,7 +819,7 @@ The prescription has been saved to the database.
         # Run the bot
         print("🤖 Medical Bot is starting in polling mode...")
         print("Bot is ready to receive messages!")
-        application.run_polling()
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
     def run_webhook(self):
         """Run the bot in webhook mode (for Railway deployment)"""
@@ -781,8 +829,9 @@ The prescription has been saved to the database.
         # Conversation handler for adding patients and prescriptions
         conv_handler = ConversationHandler(
             entry_points=[
-                MessageHandler(filters.Regex(r'^👤 Add New Patient$'), self.add_patient_start),
-                MessageHandler(filters.Regex(r'^💊 Create Prescription$'), self.create_prescription_start)
+                MessageHandler(filters.Regex(r'^👤 Add New Patient), self.add_patient_start),
+                MessageHandler(filters.Regex(r'^💊 Create Prescription), self.create_prescription_start),
+                MessageHandler(filters.Regex(r'^💊 New Prescription), self.create_prescription_start)
             ],
             states={
                 PATIENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.patient_name)],
@@ -792,7 +841,11 @@ The prescription has been saved to the database.
                 PRESCRIPTION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.prescription_input)],
                 CONFIRM_PRESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.save_prescription)]
             },
-            fallbacks=[CommandHandler('cancel', self.cancel)]
+            fallbacks=[
+                CommandHandler('cancel', self.cancel),
+                MessageHandler(filters.Regex(r'^🚫 Cancel), self.cancel),
+                MessageHandler(filters.Regex(r'^❌ Cancel), self.cancel)
+            ]
         )
 
         # Command handlers
@@ -801,7 +854,13 @@ The prescription has been saved to the database.
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.button_handler))
 
         # Setup webhook
-        asyncio.run(self.setup_webhook())
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        loop.run_until_complete(self.setup_webhook())
 
         # Get port from environment variable (Railway sets this automatically)
         port = int(os.getenv('PORT', 5000))
@@ -810,7 +869,7 @@ The prescription has been saved to the database.
         print("Bot webhook is ready!")
         
         # Run Flask app
-        self.app.run(host='0.0.0.0', port=port, debug=False)
+        self.app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
 # Usage
 if __name__ == '__main__':
@@ -825,7 +884,7 @@ if __name__ == '__main__':
     bot = MedicalBot(BOT_TOKEN)
     
     # Check if running on Railway (production) or locally (development)
-    if os.getenv('RAILWAY_ENVIRONMENT'):
+    if os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('PORT'):
         # Railway deployment - use webhook mode
         bot.run_webhook()
     else:
