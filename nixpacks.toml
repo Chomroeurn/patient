@@ -3,11 +3,11 @@
 NIXPACKS_PYTHON_VERSION = "3.12"
 
 [phases.setup]
-dependsOn = []
+nixPkgs = ["python312", "python312Packages.pip"]
 
 [phases.install]
 dependsOn = ["setup"]
-cmds = ["pip install -r requirements.txt"]
+cmds = ["python -m pip install --upgrade pip", "python -m pip install -r requirements.txt"]
 
 [phases.build]
 dependsOn = ["install"]
