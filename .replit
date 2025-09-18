@@ -3,3 +3,15 @@ channel = "stable-25_05"
 
 [agent]
 expertMode = true
+
+[workflows]
+runButton = "Run Medical Bot"
+
+[[workflows.workflow]]
+name = "Run Medical Bot"
+author = 47318778
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
