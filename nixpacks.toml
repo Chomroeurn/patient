@@ -1,0 +1,16 @@
+
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.12"
+
+[phases.setup]
+dependsOn = []
+
+[phases.install]
+dependsOn = ["setup"]
+cmds = ["pip install -r requirements.txt"]
+
+[phases.build]
+dependsOn = ["install"]
+
+[start]
+cmd = "python main.py"
